@@ -1,0 +1,32 @@
+# CI/CD quality gate with an ephemeral test environment
+# Flow: create env -> test -> always destroy
+# Auth: OIDC - no AWS keys stored anywhere
+# Set these in GitLab > Settings > CI/CD > Variables:
+#   AWS_ROLE_ARN                     (the IAM role GitLab may assume)
+#   TF_VAR_key_name, TF_VAR_my_ip    (not secrets)
+
+stages:
+  - test
+
+ephemeral-env-test:
+  stage: test
+  image:
+    name: hashicorp/terraform:latest
+    entrypoint: [""]
+  id_tokens:
+    GITLAB_OIDC_TOKEN:              # GitLab creates this short-lived token for the job
+      aud: https://gitlab.com
+  variables:
+    AWS_WEB_IDENTITY_TOKEN_FILE: $CI_PROJECT_DIR/.oidc_token   # Terraform reads this + AWS_ROLE_ARN
+  script:
+    - echo "$GITLAB_OIDC_TOKEN" > "$AWS_WEB_IDENTITY_TOKEN_FILE"
+    - apk add --no-cache curl
+    - terraform init
+    - terraform apply -auto-approve          # 1. create test env
+    - IP=$(terraform output -raw public_ip)
+    # 2. test: wait for the app to come up, fail the pipeline if it doesn't
+    - curl -sf --retry 30 --retry-delay 10 --retry-all-errors "http://$IP"
+    - echo "PASS - app is up on $IP"
+  after_script:
+    - echo "$GITLAB_OIDC_TOKEN" > "$AWS_WEB_IDENTITY_TOKEN_FILE"
+    - terraform destroy -auto-approve        # 3. always clean up, even on failure
